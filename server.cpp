@@ -36,6 +36,9 @@
 #include <arpa/inet.h>
 #include <sys/wait.h>
 #include <signal.h>
+#include <algorithm>
+#include <cctype>
+
 
 #include "server_client_handler.cpp"
 #include "client_handler.cpp"
@@ -74,12 +77,12 @@ void data_controller(int new_fd, struct sockaddr_storage their_addr)
 void handle_client(int pid, struct sockaddr_storage their_addr)
 {
 
-  std::string hostname = get_local_ip_hostname();
 
   // A temporary buffer for the client's IP address string
   char s[INET6_ADDRSTRLEN];
   inet_ntop(their_addr.ss_family, get_in_addr((struct sockaddr *)&their_addr), s, sizeof s);
   std::cout << "server: got connection from " << s << std::endl;
+  send_back(pid, 220);
 
   int numbytes;
 
@@ -101,20 +104,29 @@ void handle_client(int pid, struct sockaddr_storage their_addr)
 
   buf[strcspn(buf, "\r\n")] = '\0'; // Strip newline characters
   string message_string = buf;
+  message_string = string_to_lowercase(message_string);
   printf("server: received '%s'\n", buf);
 
-  if (message_string.find("USER") == string::npos)
+  if (message_string.find("user") == string::npos)
   {
-
+    //NOT A USER REQUEST
     send_back(pid, 530);
     close(pid);
     return;
   }
 
   if (message_string.find("anonymous") != string::npos){
-    // client
+    // client is anonymous
     send_back(pid, 230);
     client_handle_client(pid, their_addr);
+    close(pid);
+    return;
+  } else if (message_string.find("peer") != string::npos){
+
+  } else {
+    send_back(pid, 530);
+    close(pid);
+    return;
   }
 
 
@@ -144,6 +156,8 @@ map<string, string> read_config_file(string fileName)
 
 int main(int argumentCount, char *argumentArray[])
 {
+  std::string hostname = get_local_ip_hostname();
+
   int sockfd, new_fd;
   struct addrinfo hints, *servinfo, *p;
   struct sockaddr_storage their_addr;
@@ -199,7 +213,7 @@ int main(int argumentCount, char *argumentArray[])
     perror("listen");
     exit(1);
   }
-  std::cout << "server: waiting for connections... " << std::endl;
+  std::cout << "server: waiting for connections on " << hostname << ":" << PORT << "..." << std::endl;
 
   while (true)
   {

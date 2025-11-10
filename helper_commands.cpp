@@ -35,6 +35,8 @@ void send_back(int pid, std::string message)
 {
     std::string msg_str = message + "\n";
     const char *msg = msg_str.c_str();
+    printf("Server: sending back %s \n", msg);
+
     if (send(pid, msg, strlen(msg), 0) == -1)
     {
         perror("send");
@@ -44,8 +46,16 @@ void send_back(int pid, std::string message)
 void send_back(int pid, int code){
     std::string msg_str = CODES[code] + "\n";
     const char *msg = msg_str.c_str();
+    printf("Server: sending back %s \n", msg);
     if (send(pid, msg, strlen(msg), 0) == -1)
     {
         perror("send");
     }
+}
+
+string string_to_lowercase(string message){
+    std::transform(message.begin(), message.end(), message.begin(),
+                   [](unsigned char c)
+                   { return std::tolower(c); });
+    return message;
 }
