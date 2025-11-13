@@ -39,7 +39,6 @@
 #include <algorithm>
 #include <cctype>
 
-#include "server_client_handler.cpp"
 #include "client_handler.cpp"
 #include "peer_scanner.cpp" // include peer scanner logic for distributed LIST aggregation
 

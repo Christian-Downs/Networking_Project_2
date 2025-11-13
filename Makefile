@@ -7,7 +7,7 @@ compile: server run
 runclient: client clientrun
 run_test: test test_run
 
-server: client_handler.cpp helper_commands.cpp server_client_handler.cpp server.cpp peer_scanner.cpp
+server: client_handler.cpp helper_commands.cpp server.cpp peer_scanner.cpp
 	$(CXX) $(CXXFLAGS) -o server server.cpp
 client: client.cpp
 	$(CXX) $(CXXFLAGS) -o client client.cpp
