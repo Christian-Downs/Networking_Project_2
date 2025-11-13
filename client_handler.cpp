@@ -282,6 +282,29 @@ void CWD(string path, string *current_dir, string parent_dir, int pid, struct so
             if(found){
                 continue;
             }
+            // Allow entering a "virtual" peer directory when at jail root
+            if(currentPath == filesystem::path(parent_dir)){
+                bool peerFound = false;
+                {
+                    lock_guard<mutex> lk(peer_mutex);
+                    for(const auto &pr : peer_root_listing){
+                        for(const auto &line : pr.second){
+                            if(line.empty()) continue;
+                            string l = line;
+                            if(!l.empty() && l.back()=='\r') l.pop_back();
+                            size_t pos = l.find_last_of(' ');
+                            string dirname = (pos==string::npos)? l : l.substr(pos+1);
+                            if(dirname == path){ peerFound = true; break; }
+                        }
+                        if(peerFound) break;
+                    }
+                }
+                if(peerFound){
+                    *current_dir = *current_dir + "/" + path;
+                    send_back(pid, 250);
+                    return;
+                }
+            }
             send_back(pid, 501);
             return;
         }
@@ -345,13 +368,34 @@ void list(string message_string, string current_dir, int pid, struct sockaddr_st
         }
     }
 
-    // Validate directory exists
+    // Validate directory exists or is a virtual peer directory (one level under root)
     namespace fs = filesystem;
-    if (!(fs::exists(target) && fs::is_directory(target)))
-    {
-        send_back(pid, 550);
-        close_pasv(pid);
-        return;
+    bool local_exists = fs::exists(target) && fs::is_directory(target);
+    bool is_virtual_peer_dir = false;
+    if(!local_exists){
+        string parent_dir = fs::current_path().string() + "/db/";
+        if(target.rfind(parent_dir, 0) == 0){
+            string dirName = target.substr(target.find_last_of('/') + 1);
+            // Only allow single-level virtual dirs under parent_dir
+            // Confirm dirName is in peer_root_listing
+            lock_guard<mutex> lk(peer_mutex);
+            for(const auto &pr : peer_root_listing){
+                for(const auto &line : pr.second){
+                    if(line.empty()) continue;
+                    string l = line;
+                    if(!l.empty() && l.back()=='\r') l.pop_back();
+                    size_t pos = l.find_last_of(' ');
+                    string dirname = (pos==string::npos)? l : l.substr(pos+1);
+                    if(dirname == dirName){ is_virtual_peer_dir = true; break; }
+                }
+                if(is_virtual_peer_dir) break;
+            }
+        }
+        if(!is_virtual_peer_dir){
+            send_back(pid, 550);
+            close_pasv(pid);
+            return;
+        }
     }
 
     // Now accept a single data connection; if it fails, report 425 without sending 150
@@ -370,24 +414,26 @@ void list(string message_string, string current_dir, int pid, struct sockaddr_st
     try
     {
         std::cout << "LIST " << target << endl;
-        for (const auto &entry : fs::directory_iterator(target))
-        {
-            auto p = entry.path();
-
-            ostringstream line;
-
-            if (fs::is_directory(p))
+        if(local_exists){
+            for (const auto &entry : fs::directory_iterator(target))
             {
-                line << "drwxr-xr-x 1 local 0 ";
-            }
-            else
-            {
-                auto sz = fs::is_regular_file(p) ? (long long)fs::file_size(p) : 0ll;
-                line << "-rw-r--r-- 1 local " << sz << " ";
-            }
+                auto p = entry.path();
 
-            line << p.filename().string() << "\r\n";
-            listing += line.str();
+                ostringstream line;
+
+                if (fs::is_directory(p))
+                {
+                    line << "drwxr-xr-x 1 local 0 ";
+                }
+                else
+                {
+                    auto sz = fs::is_regular_file(p) ? (long long)fs::file_size(p) : 0ll;
+                    line << "-rw-r--r-- 1 local " << sz << " ";
+                }
+
+                line << p.filename().string() << "\r\n";
+                listing += line.str();
+            }
         }
     }
     catch (...)
