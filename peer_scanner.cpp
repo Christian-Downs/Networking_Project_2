@@ -18,6 +18,9 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include <unordered_map>
+#include <mutex>
+#include <algorithm>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -25,9 +28,14 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#define SLEEPTIME 100
+#define SLEEPTIME 0
 
 using namespace std;
+
+// Extern globals defined in server.cpp for distributed aggregation
+extern unordered_map<string, vector<string>> peer_root_listing;          // root-level directory lines
+extern unordered_map<string, unordered_map<string, vector<string>>> peer_dir_files; // per-peer -> dir -> file lines
+extern mutex peer_mutex; // guards both peer_root_listing and peer_dir_files
 
 using socket_t = int;
 struct Session
@@ -49,8 +57,8 @@ std::optional<std::string> recvLine(socket_t sock, int timeout_ms = SLEEPTIME)
         FD_ZERO(&rfds);
         FD_SET(sock, &rfds);
         timeval tv;
-        tv.tv_sec = timeout_ms / 1000;
-        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        tv.tv_sec =1;
+        tv.tv_usec = 50;
         int sel = select((int)sock + 1, &rfds, nullptr, nullptr, &tv);
         if (sel == 0)
         {
@@ -204,13 +212,15 @@ bool sendLine(socket_t sock, const std::string &line)
     return sendAll(sock, msg.c_str(), msg.size());
 }
 
-void loginAnonymous(Session &s)
+// Peer authentication using USER peer@<ip>
+void loginPeer(Session &s, const std::string &myIp)
 {
-    if (!sendLine(s.ctrl, "USER anonymous"))
-        throw std::runtime_error("send USER failed");
+    std::string cmd = std::string("USER peer@") + myIp;
+    if (!sendLine(s.ctrl, cmd))
+        throw std::runtime_error("send peer USER failed");
     auto r = readReply(s.ctrl);
     if (r.code != 230)
-        throw std::runtime_error("Expected 230 after USER anonymous, got: " + r.line);
+        throw std::runtime_error("Expected 230 after peer auth, got: " + r.line);
 }
 struct PasvEndpoint
 {
@@ -319,19 +329,72 @@ void peer_scanner(string interval, string subnet, string port, string myIp)
             {
                 cout << ip << endl;
                 auto sess = openSession(ip, stoi(port));
-
-                loginAnonymous(sess);
+                cout<<"Connected"<<endl;
+                loginPeer(sess, myIp);
                 auto ep = pasv(sess);
                 socket_t data_connection = connectTo(ep.ip, ep.port);
                 bool ok = sendLine(sess.ctrl, "LIST");
                 auto pre = readReply(sess.ctrl);
                 if (pre.code != 150)
                 {
+                    close(sess.ctrl);
+                    close(data_connection); 
                     continue;
                 }
                 auto listing = readAll(data_connection);
                 close(data_connection);
-                cout << listing << endl;
+                // Aggregate only directory lines at root (lines starting with 'd')
+                vector<string> dirs;
+                {
+                    lock_guard<mutex> lk(peer_mutex);
+                    auto &vec = peer_root_listing[ip];
+                    std::istringstream iss(listing);
+                    string line;
+                    while(std::getline(iss, line)){
+                        if(line.empty()) continue;
+                        if(line.back()=='\r') line.pop_back();
+                        if(line[0] == 'd'){
+                            string normalized = line + "\r\n";
+                            string dirname = line.substr(line.find_last_of(' ') + 1); // last token
+                            if(find(vec.begin(), vec.end(), normalized) == vec.end()){
+                                vec.push_back(normalized);
+                            }
+                            dirs.push_back(dirname);
+                        }
+                    }
+                }
+                // For each directory, fetch its LIST to gather file entries
+                for(const string &dirname : dirs){
+                    try {
+                        auto ep2 = pasv(sess);
+                        socket_t dc2 = connectTo(ep2.ip, ep2.port);
+                        bool ok2 = sendLine(sess.ctrl, std::string("LIST ") + dirname);
+                        auto pre2 = readReply(sess.ctrl);
+                        if(pre2.code != 150 && pre2.code != 125){
+                            close(dc2);
+                            continue;
+                        }
+                        auto listing2 = readAll(dc2);
+                        close(dc2);
+                        auto post2 = readReply(sess.ctrl);
+                        if(post2.code != 226 && post2.code != 250) continue;
+                        std::istringstream iss2(listing2);
+                        string line2;
+                        lock_guard<mutex> lk(peer_mutex);
+                        auto &fileVec = peer_dir_files[ip][dirname];
+                        while(std::getline(iss2, line2)){
+                            if(line2.empty()) continue;
+                            if(line2.back()=='\r') line2.pop_back();
+                            if(line2[0] == '-'){
+                                string normalized = line2 + "\r\n";
+                                if(find(fileVec.begin(), fileVec.end(), normalized) == fileVec.end()){
+                                    fileVec.push_back(normalized);
+                                }
+                            }
+                        }
+                    } catch(...) { /* ignore per-dir errors */ }
+                }
+                cout << "peer_scanner: aggregated dirs from " << ip << endl;
             }
             catch (...)
             {

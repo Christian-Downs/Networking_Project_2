@@ -41,13 +41,22 @@
 
 #include "server_client_handler.cpp"
 #include "client_handler.cpp"
-#include "peer_scanner.cpp"
+#include "peer_scanner.cpp" // include peer scanner logic for distributed LIST aggregation
 
 
 #define BACKLOG 10
 
 #include <unordered_map>
 using namespace std;
+
+// ==== Distributed peer aggregation globals (referenced via extern in client_handler.cpp) ====
+// Map of peer IP -> vector of directory listing lines (only root-level directories currently aggregated)
+unordered_map<string, vector<string>> peer_root_listing;
+mutex peer_mutex; // guards peer_root_listing
+// Map of peer IP -> (directory name -> vector of file listing lines) for unified LIST <dir>
+unordered_map<string, unordered_map<string, vector<string>>> peer_dir_files;
+// Global control port string exposed to handlers for peer connection reuse
+std::string CONTROL_PORT;
 
 
 
@@ -171,6 +180,11 @@ int main(int argumentCount, char *argumentArray[])
   std::map<string, string> configMap = read_config_file(argumentArray[1]);
 
   const char *PORT = configMap["PORT"].c_str();
+  CONTROL_PORT = PORT; // set global
+  // Optional distributed settings (solo mode if absent or empty)
+  string peerSubnet = configMap.count("PEER_SUBNET") ? configMap["PEER_SUBNET"] : ""; // e.g. 192.168.0.0/28
+  string peerPort   = configMap.count("PEER_PORT") ? configMap["PEER_PORT"] : PORT;    // reuse control port if unspecified
+  string scanInterval = configMap.count("SCAN_INTERVAL") ? configMap["SCAN_INTERVAL"] : "30"; // seconds between scans
 
   memset(&hints, 0, sizeof hints);
   hints.ai_family = AF_INET;
@@ -217,12 +231,22 @@ int main(int argumentCount, char *argumentArray[])
     exit(1);
   }
   std::cout << "server: waiting for connections on " << hostname << ":" << PORT << "..." << std::endl;
-  if (configMap.contains("PEER_INTERVAL") 
-  && !configMap.at("PEER_INTERVAL").empty() 
-  && configMap.contains("PEER_SUBNET") &&
-      !configMap.at("PEER_SUBNET").empty())
-  {
-    jthread(peer_scanner, configMap["PEER_INTERVAL"], configMap["PEER_SUBNET"], configMap["PORT"], hostname).detach();
+  // Legacy PEER_INTERVAL support: if old key present and no SCAN_INTERVAL override, reuse it
+  if(scanInterval == "30" && configMap.contains("PEER_INTERVAL") && !configMap.at("PEER_INTERVAL").empty()){
+      scanInterval = configMap["PEER_INTERVAL"]; // backward compatibility
+  }
+
+  // Launch background peer scanner if subnet configured (simple fire-and-forget thread)
+  if(!peerSubnet.empty()){
+    std::jthread([peerSubnet, peerPort, scanInterval]{
+        try {
+            // Determine local IP once (used to skip self)
+            string myIp = get_local_ip_hostname();
+            peer_scanner(scanInterval, peerSubnet, peerPort, myIp); // infinite loop inside
+        } catch(...) {
+            // swallow errors; scanner resilience is best-effort
+        }
+    }).detach();
   }
 
   while (true)

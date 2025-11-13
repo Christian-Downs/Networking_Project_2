@@ -8,6 +8,9 @@
 #include <map>
 #include <fstream>
 #include <filesystem>
+#include <unordered_map>
+#include <mutex>
+#include <optional>
 
 // C headers for socket API
 #include <stdio.h>
@@ -31,6 +34,52 @@ struct PassiveSession { // set up a PASV Session object
 };
 
 static unordered_map <int, PassiveSession> pasv_map;  // key = controller pid
+// Extern peer aggregation structures (defined in server.cpp)
+extern unordered_map<string, vector<string>> peer_root_listing;
+extern unordered_map<string, unordered_map<string, vector<string>>> peer_dir_files;
+extern mutex peer_mutex;
+extern std::string CONTROL_PORT;
+
+// ---- Remote RETR redirect support structures ----
+struct RemoteRetrSession {
+    int peer_ctrl_fd = -1; // control connection to peer
+    std::string peer_ip;
+    int peer_port = 0; // passive data port on peer
+};
+static unordered_map<int, RemoteRetrSession> remote_retr_map; // key = client control pid
+
+static int remote_connect_socket(const std::string &host, int port){
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if(s < 0) return -1;
+    sockaddr_in addr{}; addr.sin_family = AF_INET; addr.sin_port = htons((uint16_t)port);
+    if(inet_pton(AF_INET, host.c_str(), &addr.sin_addr) <= 0){ close(s); return -1; }
+    if(connect(s, (sockaddr*)&addr, sizeof(addr)) < 0){ close(s); return -1; }
+    return s;
+}
+
+static std::optional<std::string> remote_recv_line(int sock){
+    std::string line; char ch;
+    while(true){
+        int n = recv(sock, &ch, 1, 0);
+        if(n <= 0){ if(line.empty()) return std::nullopt; break; }
+        if(ch == '\n') break; if(ch != '\r') line.push_back(ch);
+        if(line.size() > 8192) break;
+    }
+    return line;
+}
+
+static int remote_read_reply_code(int sock){
+    auto ln = remote_recv_line(sock); if(!ln) return -1;
+    std::string line = *ln;
+    if(line.size() < 3 || !isdigit(line[0]) || !isdigit(line[1]) || !isdigit(line[2])) return -1;
+    return atoi(line.substr(0,3).c_str());
+}
+
+static bool remote_send_line(int sock, const std::string &cmd){
+    std::string out = cmd;
+    if(out.size() <2 || out.substr(out.size()-2) != "\r\n") out += "\r\n";
+    return send(sock, out.c_str(), out.size(), 0) == (ssize_t)out.size();
+}
 
 static std::string local_ip_for_socket(int ctrl_pid)
 {
@@ -118,7 +167,7 @@ static string enter_pasv(int ctrl_pid){
 }
 
 // Accept a single data connection from the stored PASV listener; returns -1 if none.
-static int accept_pasv_data(int ctrl_pid, int timeout_ms = 5000){
+static int accept_pasv_data(int ctrl_pid, int timeout_ms = 2000){
     auto it = pasv_map.find(ctrl_pid);
     if(it == pasv_map.end() || it->second.listen_socket<0) return -1;
 
@@ -175,6 +224,17 @@ void CWD(string path, string *current_dir, string parent_dir, int pid, struct so
 {
     filesystem::path currentPath = *current_dir;
     cout << *current_dir << endl;
+    if(path.empty()){
+        send_back(pid, 501);
+        return;
+    }
+    // Absolute paths are forbidden by jail
+    if(!path.empty() && path[0] == '/'){
+        send_back(pid, 550);
+        return;
+    }
+    // Normalize repeated slashes
+    while(path.find("//") != string::npos) path.replace(path.find("//"), 2, "/");
     vector<string> paths;
     string singlePath;
     size_t pos = 0;
@@ -191,6 +251,9 @@ void CWD(string path, string *current_dir, string parent_dir, int pid, struct so
     for (string path : paths)
     {
         cout<<path<<endl;
+        if(path == "." || path.empty()){
+            continue; // ignore current directory markers
+        }
         if(path == ".."){
             cout << "GOING UP" << endl;
             currentPath = currentPath.string().substr(0, currentPath.string().rfind("/"));
@@ -242,16 +305,43 @@ void list(string message_string, string current_dir, int pid, struct sockaddr_st
     if (message_string.size() > 4)
     {
         string arg = message_string.substr(5);
+        // trim leading spaces
+        while(!arg.empty() && isspace((unsigned char)arg.front())) arg.erase(arg.begin());
         if (!arg.empty())
         {
-            // basic traversal guard
-            if (arg[0] == '/' || arg.find("..") != string::npos)
+            // If arg is composed only of '/' and '.' (and not ".."), normalize to current dir
+            bool only_slash_dot = (arg.find_first_not_of("/.") == string::npos);
+            if (only_slash_dot && arg.find("..") == string::npos)
             {
-                send_back(pid, 550);
-                close_pasv(pid);
-                return;
+                // If it's only slashes (no dots), treat as absolute and block; if contains a dot, normalize to current dir
+                if (arg.find('.') == string::npos)
+                {
+                    send_back(pid, 550);
+                    close_pasv(pid);
+                    return;
+                }
+                // else: Treat as current directory
             }
-            target = current_dir + "/" + arg;
+            else
+            {
+                // basic traversal guard
+                if (arg[0] == '/' || arg.find("..") != string::npos)
+                {
+                    send_back(pid, 550);
+                    close_pasv(pid);
+                    return;
+                }
+                // Normalize repeated slashes and remove benign './'
+                while(arg.find("//") != string::npos) arg.replace(arg.find("//"), 2, "/");
+                while(true){
+                    size_t p = arg.find("/./");
+                    if(p == string::npos) break;
+                    arg.replace(p, 3, "/");
+                }
+                if(arg == ".") arg.clear();
+                if(!arg.empty())
+                    target = current_dir + "/" + arg;
+            }
         }
     }
 
@@ -308,11 +398,43 @@ void list(string message_string, string current_dir, int pid, struct sockaddr_st
         return;
     }
 
-    if (!listing.empty())
-    {
-        (void)send_all(data_fd, listing.c_str(), listing.size());
-    }
+    // Unified aggregation: append peer directory entries at root, or peer file entries within subdirectory
+    try {
+        lock_guard<mutex> lk(peer_mutex);
+        string parent_dir = filesystem::current_path().string() + "/db/"; // reconstruct jail root
+        if(current_dir == parent_dir){
+            for(const auto &pr : peer_root_listing){
+                for(const auto &line : pr.second){
+                    if(line.empty()) continue;
+                    if(line[0] == 'd'){
+                        string mod = line;
+                        size_t pos = mod.find(" local ");
+                        if(pos != string::npos) mod.replace(pos+1, 5, "peer");
+                        listing += mod; // already CRLF terminated
+                    }
+                }
+            }
+        } else {
+            // Directory name portion after parent_dir
+            string dirName = current_dir.substr(current_dir.find_last_of('/') + 1);
+            for(const auto &peer : peer_dir_files){
+                auto itDir = peer.second.find(dirName);
+                if(itDir != peer.second.end()){
+                    for(const string &fline : itDir->second){
+                        if(fline.empty()) continue;
+                        if(fline[0] == '-'){
+                            string mod = fline;
+                            size_t pos = mod.find(" local ");
+                            if(pos != string::npos) mod.replace(pos+1, 5, "peer");
+                            listing += mod;
+                        }
+                    }
+                }
+            }
+        }
+    } catch(...){ /* ignore aggregation issues */ }
 
+    if (!listing.empty()) (void)send_all(data_fd, listing.c_str(), listing.size());
     close(data_fd);
     close_pasv(pid);
     send_back(pid, 226);
@@ -330,6 +452,9 @@ void client_handle_client(int pid, struct sockaddr_storage their_addr)
 {
     string parent_dir = filesystem::current_path().string() + "/db/";
     string current_dir = parent_dir;
+
+    // Ensure no stale PASV entry is associated with this control fd (fd reuse could collide)
+    pasv_map.erase(pid);
 
     char s[INET6_ADDRSTRLEN];
     inet_ntop(their_addr.ss_family, get_in_addr((struct sockaddr *)&their_addr), s, sizeof s);
@@ -396,6 +521,8 @@ void client_handle_client(int pid, struct sockaddr_storage their_addr)
         {
             printf("server: ending connection with client");
             send_back(pid, 221);
+            // ensure any PASV listener is torn down when quitting
+            close_pasv(pid);
             return;
         } else if (message_string == "cdup"){
             cdup(&current_dir, parent_dir, pid, their_addr);
@@ -429,43 +556,91 @@ void client_handle_client(int pid, struct sockaddr_storage their_addr)
             }
 
             string full = current_dir + "/" + arg;
+            namespace fs = filesystem;
+            bool local_exists = fs::exists(full) && fs::is_regular_file(full);
 
-            int data_fd = accept_pasv_data(pid);
+            if(local_exists){
+                int data_fd = accept_pasv_data(pid);
+                if(data_fd < 0){ send_back(pid, 425); close_pasv(pid); continue; }
+                send_back(pid, 150);
+                bool ok = false;
+                try {
+                    ifstream in(full, ios::binary);
+                    if(in){
+                        char buff[8192];
+                        while(in.good()){
+                            in.read(buff, sizeof(buff));
+                            streamsize n = in.gcount();
+                            if(n>0 && !send_all(data_fd, buff, (size_t)n)) break;
+                        }
+                        ok = true;
+                    }
+                } catch(...) { ok = false; }
+                close(data_fd); close_pasv(pid);
+                send_back(pid, ok ? 226 : 550);
+                continue;
+            }
 
-            if(data_fd < 0) {
-                send_back(pid, 425);
+            // Remote redirect path: find file in peer_dir_files for current directory
+            string dirName = current_dir.substr(current_dir.find_last_of('/') + 1);
+            string remote_ip;
+            {
+                lock_guard<mutex> lk(peer_mutex);
+                for(const auto &peer : peer_dir_files){
+                    auto itD = peer.second.find(dirName);
+                    if(itD != peer.second.end()){
+                        for(const auto &line : itD->second){
+                            // line format: -rw-r--r-- 1 peer size filename\r\n
+                            size_t lastSpace = line.find_last_of(' ');
+                            if(lastSpace != string::npos){
+                                string fname = line.substr(lastSpace + 1);
+                                if(!fname.empty() && fname.back()=='\r') fname.pop_back();
+                                if(fname == arg){ remote_ip = peer.first; break; }
+                            }
+                        }
+                    }
+                    if(!remote_ip.empty()) break;
+                }
+            }
+
+            if(remote_ip.empty()){
+                // Not found anywhere
+                send_back(pid, 550);
                 close_pasv(pid);
                 continue;
             }
 
-            send_back(pid, 150);
+            // Negotiate remote PASV with peer
+            int peer_ctrl = remote_connect_socket(remote_ip, atoi(CONTROL_PORT.c_str()));
+            if(peer_ctrl < 0){ send_back(pid, 425); close_pasv(pid); continue; }
+            // Expect banner
+            (void)remote_read_reply_code(peer_ctrl);
+            if(!remote_send_line(peer_ctrl, std::string("USER peer@") + local_ip_for_socket(pid))){ close(peer_ctrl); send_back(pid, 425); close_pasv(pid); continue; }
+            int authCode = remote_read_reply_code(peer_ctrl);
+            if(authCode != 230){ close(peer_ctrl); send_back(pid, 530); close_pasv(pid); continue; }
+            if(!remote_send_line(peer_ctrl, "PASV")){ close(peer_ctrl); send_back(pid,425); close_pasv(pid); continue; }
+            auto ln = remote_recv_line(peer_ctrl);
+            if(!ln || ln->rfind("227",0)!=0){ close(peer_ctrl); send_back(pid,425); close_pasv(pid); continue; }
+            // Forward peer's 227 directly to client (data redirect)
+            send_back(pid, *ln + "\n"); // already formatted with CRLF inside
+            close_pasv(pid); // tear down local passive listener (redirect scenario)
 
-            bool ok = false;
-
-            try {
-                ifstream in(full, ios::binary);
-                if(in) {
-                    char buff[8192];
-                    while(in.good()){
-                        in.read(buff, sizeof(buff));
-                        streamsize n = in.gcount();
-                        if(n>0 && !send_all(data_fd, buff, (size_t)n)) break;
-                    }
-                    ok = true;
-                }
-            } catch (...) { ok = false; }
-
-            close(data_fd);
-            close_pasv(pid);
-            if(ok) send_back(pid, 226);
-            else send_back(pid, 550);
-
+            // Forward RETR command to peer now (client will connect to peer data port)
+            if(!remote_send_line(peer_ctrl, std::string("RETR ") + arg)) { close(peer_ctrl); send_back(pid, 425); continue; }
+            int preCode = remote_read_reply_code(peer_ctrl); // expect 150
+            if(preCode == 150 || preCode == 125){ send_back(pid, preCode); } else { send_back(pid, preCode>0?preCode:550); }
+            // Wait for completion code (226 or error)
+            int finCode = remote_read_reply_code(peer_ctrl);
+            if(finCode == 226) send_back(pid, 226); else if(finCode>0) send_back(pid, finCode); else send_back(pid, 550);
+            close(peer_ctrl);
             continue;
         } else {
             send_back(pid, 500);
             continue;
         }
     }
+    // Ensure PASV state is cleared when control connection ends
+    close_pasv(pid);
 }
 
 void peer_handler(int pid, string their_addr, string message, string subnet)

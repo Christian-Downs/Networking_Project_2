@@ -13,6 +13,13 @@ Use the provided `Makefile` targets:
 - `make test` + `make test_run` → builds & runs `ftp_tests` against 127.0.1.1:3490.
 Recompile after changes in any included handler file; no separate object build currently.
 
+### Config Keys
+`server.conf` supports (in addition to `PORT`):
+- `PEER_SUBNET=192.168.0.0/28` enables background peer scanning (solo mode if empty or missing).
+- `SCAN_INTERVAL=30` seconds between scans (legacy `PEER_INTERVAL` honored if `SCAN_INTERVAL` absent).
+- `PEER_PORT=<port>` if peers listen on a distinct control port (falls back to `PORT`).
+Omitted or empty `PEER_SUBNET` disables all distributed behavior.
+
 ## Architecture & Flow
 Main accept loop (`server.cpp`) spawns a detached `std::jthread` per connection calling `handle_client`. That function performs a simple USER gate and hands off to `client_handle_client` for the FTP command loop. Command loop lowercases input (`string_to_lowercase` in `helper_commands.cpp`) then branches by exact match or prefix (`rfind("list",0) == 0`). Multi-phase commands (LIST, RETR) require active PASV state.
 

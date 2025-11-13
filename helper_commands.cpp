@@ -34,7 +34,11 @@ void *get_in_addr(struct sockaddr *sa)
 
 void send_back(int pid, std::string message)
 {
-    std::string msg_str = message + "\n";
+    std::string msg_str = message;
+    if (msg_str.empty() || msg_str.back() != '\n')
+    {
+        msg_str += "\n";
+    }
     const char *msg = msg_str.c_str();
     printf("Server: sending back %s \n", msg);
 
