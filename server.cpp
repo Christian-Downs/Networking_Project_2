@@ -222,7 +222,7 @@ int main(int argumentCount, char *argumentArray[])
   && configMap.contains("PEER_SUBNET") &&
       !configMap.at("PEER_SUBNET").empty())
   {
-    jthread(peer_scanner, configMap["PEER_INTERVAL"], configMap["PEER_SUBNET"], configMap["PORT"]).detach();
+    jthread(peer_scanner, configMap["PEER_INTERVAL"], configMap["PEER_SUBNET"], configMap["PORT"], hostname).detach();
   }
 
   while (true)

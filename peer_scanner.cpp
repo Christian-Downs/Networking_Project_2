@@ -25,7 +25,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#define SLEEPTIME 5000
+#define SLEEPTIME 100
 
 using namespace std;
 
@@ -115,7 +115,7 @@ struct Reply
     int code = -1;
     std::string line;
 };
-Reply readReply(socket_t sock, int timeout_ms = 5000)
+Reply readReply(socket_t sock, int timeout_ms = SLEEPTIME)
 {
     auto opt = recvLine(sock, timeout_ms);
     if (!opt)
@@ -164,6 +164,10 @@ Session openSession(const std::string &host, int port)
     auto r = readReply(s.ctrl); // banner
     if (r.code < 200 || r.code >= 400)
         throw std::runtime_error("Unexpected banner: " + r.line);
+    if (r.code != 220)
+    {
+        throw runtime_error("AAAA");
+    }
     return s;
 }
 void closeSession(Session &s)
@@ -243,7 +247,7 @@ PasvEndpoint pasv(Session &s, int expectedCode = 227)
     return parse227(r.line);
 }
 
-void peer_scanner(string interval, string subnet, string port)
+void peer_scanner(string interval, string subnet, string port, string myIp)
 {
 
     int sleep_interval = stoi(interval);
@@ -260,16 +264,20 @@ void peer_scanner(string interval, string subnet, string port)
 
     string sub = subnet;
     string startingIp = subnet.substr(0, subnet.rfind("/"));
-    int range = stoi(subnet.substr(subnet.rfind("/")+1)); // 192.168.x.x
-    int loops = range/256; // 192.168.x
-    cout<<range<<endl;
+    int range = stoi(subnet.substr(subnet.rfind("/") + 1)); // 192.168.x.x
+    int loops = range / 256;                                // 192.168.x
+    cout << range << endl;
     vector<int> ip;
-    while(!startingIp.empty()){
-        cout<<startingIp<<endl;
-        if(startingIp.find(".") != string::npos){
-            ip.push_back(stoi(startingIp.substr(0,startingIp.find("."))));
-            startingIp.erase(0,startingIp.find(".")+1);
-        } else {
+    while (!startingIp.empty())
+    {
+        cout << startingIp << endl;
+        if (startingIp.find(".") != string::npos)
+        {
+            ip.push_back(stoi(startingIp.substr(0, startingIp.find("."))));
+            startingIp.erase(0, startingIp.find(".") + 1);
+        }
+        else
+        {
             ip.push_back(stoi(startingIp));
             break;
         }
@@ -277,42 +285,60 @@ void peer_scanner(string interval, string subnet, string port)
 
     vector<string> ips;
 
-    for(int i = 0; i <= loops; i++){
-        if(i != loops){
-            for(int j = 0; j < 256; j ++){
+    for (int i = 0; i <= loops; i++)
+    {
+        if (i != loops)
+        {
+            for (int j = 0; j < 256; j++)
+            {
                 string currentIp;
                 currentIp = to_string(ip[0]) + "." + to_string(ip[1]) + "." + to_string(i) + "." + to_string(j);
+                if (myIp == currentIp)
+                    continue;
+
                 ips.push_back(currentIp);
             }
-        } else {
-            for(int j = 0; j < range%256; j ++){
+        }
+        else
+        {
+            for (int j = 0; j < range % 256; j++)
+            {
                 string currentIp;
                 currentIp = to_string(ip[0]) + "." + to_string(ip[1]) + "." + to_string(i) + "." + to_string(j);
+                if (myIp == currentIp)
+                    continue;
                 ips.push_back(currentIp);
             }
         }
     }
     while (true)
     {
-        for(string ip : ips){
-            try{
+        for (string ip : ips)
+        {
+            try
+            {
+                cout << ip << endl;
                 auto sess = openSession(ip, stoi(port));
+
                 loginAnonymous(sess);
                 auto ep = pasv(sess);
                 socket_t data_connection = connectTo(ep.ip, ep.port);
                 bool ok = sendLine(sess.ctrl, "LIST");
                 auto pre = readReply(sess.ctrl);
-                if(pre.code != 150){
+                if (pre.code != 150)
+                {
                     continue;
                 }
                 auto listing = readAll(data_connection);
                 close(data_connection);
-                cout<<listing<<endl;
-            } catch (...){
-                //ignore
+                cout << listing << endl;
             }
-        }   
-        
+            catch (...)
+            {
+                // ignore
+            }
+        }
+
         sleep(sleep_interval);
     }
 }

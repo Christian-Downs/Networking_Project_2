@@ -8,6 +8,7 @@
 #include <system_error>
 #include <map>
 #include <fstream>
+#include <algorithm>
 
 // C headers for socket API
 #include <stdio.h>
@@ -66,10 +67,9 @@ static bool send_all(int pid, const char *buf, size_t len)
     }
     return true;
 }
-
-string string_to_lowercase(string message){
+std::string string_to_lowercase(std::string message){
     std::transform(message.begin(), message.end(), message.begin(),
                    [](unsigned char c)
                    { return std::tolower(c); });
     return message;
-}
+}   
