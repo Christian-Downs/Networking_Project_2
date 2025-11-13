@@ -204,8 +204,6 @@ static void close_pasv(int ctrl_pid){
 
 void pwd(string current_dir, string parent_dir, int pid, struct sockaddr_storage their_addr)
 {
-    printf("server: Sending the directory");
-
     if (current_dir.find(parent_dir) != string::npos)
     {
         current_dir.erase(0, current_dir.find(parent_dir) + parent_dir.length());
@@ -223,7 +221,6 @@ void pwd(string current_dir, string parent_dir, int pid, struct sockaddr_storage
 void CWD(string path, string *current_dir, string parent_dir, int pid, struct sockaddr_storage their_addr)
 {
     filesystem::path currentPath = *current_dir;
-    cout << *current_dir << endl;
     if(path.empty()){
         send_back(pid, 501);
         return;
@@ -250,14 +247,11 @@ void CWD(string path, string *current_dir, string parent_dir, int pid, struct so
 
     for (string path : paths)
     {
-        cout<<path<<endl;
         if(path == "." || path.empty()){
             continue; // ignore current directory markers
         }
         if(path == ".."){
-            cout << "GOING UP" << endl;
             currentPath = currentPath.string().substr(0, currentPath.string().rfind("/"));
-            cout<<currentPath.string()<<endl;
             if(currentPath.string().find(parent_dir) == string::npos){
                 *current_dir = parent_dir;
                 send_back(pid, 550);
@@ -270,11 +264,9 @@ void CWD(string path, string *current_dir, string parent_dir, int pid, struct so
             bool found = false;
             for (const auto &entry : filesystem::directory_iterator(currentPath))
             {
-                cout << entry.path().string().substr(entry.path().string().rfind("/") + 1) << endl;
                 if (path == entry.path().string().substr(entry.path().string().rfind("/") + 1))
                 {
                     *current_dir = *current_dir + "/" + path;
-                    std::cout << "Current dir " << *current_dir << endl;
                     found = true;
                     break;
                 }
@@ -324,7 +316,7 @@ void list(string message_string, string current_dir, int pid, struct sockaddr_st
 
     // Determine and validate target path BEFORE opening data connection
     string target = current_dir;
-    cout << "TARGET: " << target << endl;
+    
     if (message_string.size() > 4)
     {
         string arg = message_string.substr(5);
@@ -413,7 +405,7 @@ void list(string message_string, string current_dir, int pid, struct sockaddr_st
     string listing;
     try
     {
-        std::cout << "LIST " << target << endl;
+        
         if(local_exists){
             for (const auto &entry : fs::directory_iterator(target))
             {
@@ -504,7 +496,7 @@ void client_handle_client(int pid, struct sockaddr_storage their_addr)
 
     char s[INET6_ADDRSTRLEN];
     inet_ntop(their_addr.ss_family, get_in_addr((struct sockaddr *)&their_addr), s, sizeof s);
-    std::cout << "server: got connection from " << s << std::endl;
+    
 
     filesystem::path basepath = "";
 
@@ -531,7 +523,7 @@ void client_handle_client(int pid, struct sockaddr_storage their_addr)
         string message_string = buf;
         message_string = string_to_lowercase(message_string);
 
-        printf("server: received '%s'\n", buf);
+        
 
         if (message_string == "pwd")
         {
@@ -565,7 +557,7 @@ void client_handle_client(int pid, struct sockaddr_storage their_addr)
         }
         else if (message_string == "quit")
         {
-            printf("server: ending connection with client");
+            
             send_back(pid, 221);
             // ensure any PASV listener is torn down when quitting
             close_pasv(pid);
@@ -742,7 +734,7 @@ void peer_handler(int pid, string their_addr, string message, string subnet)
         string message_string = buf;
         message_string = string_to_lowercase(message_string);
 
-        printf("server(peer): received '%s'\n", buf);
+        
 
         if (message_string == "quit"){
             send_back(pid, 221);

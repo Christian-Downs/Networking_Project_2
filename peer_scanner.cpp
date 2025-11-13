@@ -57,7 +57,7 @@ void drainOptional(Session &s, int maxLines = 2, int timeout_ms = 100)
     for(int i=0;i<maxLines;i++){
         auto opt = recvLine(s.ctrl, timeout_ms);
         if(!opt) return;
-        std::cout << "drainOptional: extra reply [" << *opt << "]" << std::endl;
+        // swallowed silently
     }
 }
 
@@ -74,14 +74,11 @@ std::optional<std::string> recvLine(socket_t sock, int timeout_ms = SLEEPTIME)
         if (sel == 0) return std::nullopt;
         if (sel < 0) return std::nullopt;
         int n = recv(sock, &ch, 1, 0);
-        cout<<n<<endl;
         if (n <= 0) return line.empty() ? std::nullopt : std::optional<std::string>(line);
-        cout << ch << endl;
         if (ch == '\n') break;
         if (ch != '\r') line.push_back(ch);
         if (line.size() > 8192) break;
     }
-    cout<<"LINE: " << line<<endl;
     return line;
 }
 
@@ -112,7 +109,6 @@ socket_t connectTo(const std::string &host, int port)
         close(s);
         throw std::runtime_error("connect() failed to " + host + ":" + std::to_string(port));
     }
-    cout << "connectTo ok: " << host << ":" << port << endl;
     return s;
 }
 struct Reply
@@ -122,14 +118,12 @@ struct Reply
 };
 Reply readReply(socket_t sock, int timeout_ms = SLEEPTIME)
 {
-    cout<<"READING"<<endl;
     auto opt = recvLine(sock, timeout_ms);
     if (!opt) throw std::runtime_error("Timed out waiting for reply");
     std::string line = *opt;
     if (line.size() < 3 || !std::isdigit(line[0]) || !std::isdigit(line[1]) || !std::isdigit(line[2]))
         throw std::runtime_error("Malformed reply: " + line);
     int code = std::atoi(line.substr(0, 3).c_str());
-    cout << "readReply parsed: code=" << code << " line=[" << line << "]" << endl;
     return Reply{code, line};
 }
 
@@ -146,11 +140,9 @@ std::string readAll(socket_t sock, int timeout_ms = SLEEPTIME)
         fd_set rfds; FD_ZERO(&rfds); FD_SET(sock, &rfds);
         timeval tv; tv.tv_sec = 0; tv.tv_usec = 200 * 1000; // 200ms slice
         int sel = select(sock+1, &rfds, nullptr, nullptr, &tv);
-        cout << "readAll: select result=" << sel << endl;
         if(sel < 0){ perror("readAll: select"); break; }
         if(sel == 0){ continue; } // slice timed out, loop again until overall cap
         int n = recv(sock, buf, sizeof(buf), 0);
-        cout << "readAll: recv bytes=" << n << endl;
         if(n <= 0){ break; }
         out.append(buf, buf+n);
         if(out.size() > (1<<24)) break; // 16MB safety cap
@@ -160,16 +152,11 @@ std::string readAll(socket_t sock, int timeout_ms = SLEEPTIME)
         fd_set rfds; FD_ZERO(&rfds); FD_SET(sock, &rfds);
         timeval tv{0, 300*1000}; // extra 300ms grace
         int sel = select(sock+1, &rfds, nullptr, nullptr, &tv);
-        cout << "readAll: fallback select result=" << sel << endl;
         if(sel > 0){
             int n = recv(sock, buf, sizeof(buf), 0);
-            cout << "readAll: fallback recv bytes=" << n << endl;
             if(n > 0) out.append(buf, buf+n);
         }
     }
-    auto end = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    cout << "readAll: done elapsed_ms=" << elapsed << " total_bytes=" << out.size() << endl;
     return out;
 }
 
@@ -186,7 +173,6 @@ Session openSession(const std::string &host, int port)
     {
         throw runtime_error("AAAA");
     }
-    cout << "openSession: banner ok for " << host << ":" << port << endl;
     return s;
 }
 void closeSession(Session &s)
@@ -265,7 +251,6 @@ bool sendLine(socket_t sock, const std::string &line)
     {
         msg += "\r\n";
     }
-    std::cout << "SENDING: " << msg << std::endl;
     return sendAll(sock, msg.c_str(), msg.size());
 }
 
@@ -310,11 +295,9 @@ PasvEndpoint pasv(Session &s, int expectedCode = 227)
     if (!sendLine(s.ctrl, "PASV"))
         throw std::runtime_error("send PASV failed");
     auto r = readReply(s.ctrl, 1500);
-    cout << "PASV reply: [" << r.line << "]" << endl;
     if (r.code != expectedCode)
         throw std::runtime_error("PASV expected 227, got: " + r.line);
     auto ep = parse227(r.line);
-    cout << "Parsed endpoint: " << ep.ip << ":" << ep.port << endl;
     return ep;
 }
 
@@ -388,39 +371,30 @@ void peer_scanner(string interval, string subnet, string port, string myIp)
         {
             try
             {
-                cout << ip << endl;
+                
                 if (!quickTcpPing(ip, stoi(port), 80))  // 80 ms probe
                 {
-                    cout << "quickTcpPing: offline " << ip << ":" << port << endl;
                     continue; // skip quickly if nothing is listening
                 }
 
                 auto sess = openSession(ip, stoi(port));
-                cout<<"Connected"<<endl;
                 loginPeer(sess, myIp);
                 // Drain any stray banner/motd lines if server sent them
                 drainOptional(sess, 3, 120);
                 auto ep = pasv(sess);
                 socket_t data_connection = connectTo(ep.ip, ep.port);
-                cout << "Sending LIST (root) to " << ip << endl;
-                (void)sendLine(sess.ctrl, "LIST"); cout.flush();
+                (void)sendLine(sess.ctrl, "LIST");
                 auto pre = readReply(sess.ctrl, 300);
-                cout << "Pre-transfer code: " << pre.code << " line=[" << pre.line << "]" << endl;
                 if (pre.code != 150 && pre.code != 125){
                     close(data_connection);
                     closeSession(sess);
                     continue;
                 }
                 auto listing = readAll(data_connection, 800); // allow more time for initial directory enumeration
-                cout << "Data bytes (root): " << listing.size() << endl;
-                if(!listing.empty()){
-                    cout << "Listing preview (root):\n" << listing.substr(0, std::min<size_t>(listing.size(), 200)) << endl;
-                }
                 close(data_connection);
                 // consume completion 226/250
                 try {
                     auto post = readReply(sess.ctrl, 300);
-                    cout << "Post-transfer code: " << post.code << " line=[" << post.line << "]" << endl;
                     if(post.code != 226 && post.code != 250){ closeSession(sess); continue; }
                 } catch(...) { closeSession(sess); continue; }
                 // Aggregate only directory lines at root (lines starting with 'd')
@@ -471,22 +445,15 @@ void peer_scanner(string interval, string subnet, string port, string myIp)
                     try {
                         auto ep2 = pasv(sess);
                         socket_t dc2 = connectTo(ep2.ip, ep2.port);
-                        cout << "Sending LIST (dir) '" << dirname << "' to " << ip << endl;
                         (void)sendLine(sess.ctrl, std::string("LIST ") + dirname);
                         auto pre2 = readReply(sess.ctrl, 300);
-                        cout << "Pre-transfer (dir) code: " << pre2.code << " line=[" << pre2.line << "]" << endl;
                         if(pre2.code != 150 && pre2.code != 125){
                             close(dc2);
                             continue;
                         }
                         auto listing2 = readAll(dc2, 800);
-                        cout << "Data bytes (dir) '" << dirname << "': " << listing2.size() << endl;
-                        if(!listing2.empty()){
-                            cout << "Listing preview (dir):\n" << listing2.substr(0, std::min<size_t>(listing2.size(), 200)) << endl;
-                        }
                         close(dc2);
                         auto post2 = readReply(sess.ctrl, 300);
-                        cout << "Post-transfer (dir) code: " << post2.code << " line=[" << post2.line << "]" << endl;
                         if(post2.code != 226 && post2.code != 250) continue;
                         std::istringstream iss2(listing2);
                         string line2;
@@ -504,7 +471,7 @@ void peer_scanner(string interval, string subnet, string port, string myIp)
                         }
                     } catch(...) { /* ignore per-dir errors */ }
                 }
-                cout << "peer_scanner: aggregated dirs from " << ip << endl;
+                
             }
             catch (...)
             {
