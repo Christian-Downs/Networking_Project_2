@@ -27,6 +27,8 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <fcntl.h>
+
 
 #define SLEEPTIME 0
 
@@ -201,6 +203,52 @@ bool sendAll(socket_t sock, const char *buf, size_t len)
     return true;
 }
 
+bool quickTcpPing(const std::string &ip, int port, int timeout_ms = 100)
+{
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0)
+        return false;
+
+    // Make socket non-blocking
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
+
+    int res = connect(sock, (sockaddr *)&addr, sizeof(addr));
+    if (res < 0 && errno != EINPROGRESS)
+    {
+        close(sock);
+        return false;
+    }
+
+    fd_set wfds;
+    FD_ZERO(&wfds);
+    FD_SET(sock, &wfds);
+
+    timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+
+    res = select(sock + 1, nullptr, &wfds, nullptr, &tv);
+
+    if (res > 0)
+    {
+        int err;
+        socklen_t len = sizeof(err);
+        getsockopt(sock, SOL_SOCKET, SO_ERROR, &err, &len);
+
+        close(sock);
+        return (err == 0); // SUCCESS → server is up
+    }
+
+    close(sock);
+    return false;
+}
+
 bool sendLine(socket_t sock, const std::string &line)
 {
     std::string msg = line;
@@ -328,7 +376,10 @@ void peer_scanner(string interval, string subnet, string port, string myIp)
             try
             {
                 cout << ip << endl;
-                auto sess = openSession(ip, stoi(port));
+                if (!quickTcpPing(ip, stoi(port), 80))  // 80 ms probe
+    continue; // skip quickly if nothing is listening
+
+auto sess = openSession(ip, stoi(port));
                 cout<<"Connected"<<endl;
                 loginPeer(sess, myIp);
                 auto ep = pasv(sess);
