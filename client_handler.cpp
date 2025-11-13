@@ -667,6 +667,12 @@ void peer_handler(int pid, string their_addr, string message, string subnet)
         return;
     }
 
+    // Set up jailed working dir for peer sessions, same as normal clients
+    string parent_dir = filesystem::current_path().string() + "/db/";
+    string current_dir = parent_dir;
+    // Clear any stale PASV state for this control fd
+    pasv_map.erase(pid);
+
     send_back(pid, 230); // authenticated
     int numbytes;
 
@@ -690,9 +696,44 @@ void peer_handler(int pid, string their_addr, string message, string subnet)
         string message_string = buf;
         message_string = string_to_lowercase(message_string);
 
-        printf("server: received '%s'\n", buf);
+        printf("server(peer): received '%s'\n", buf);
 
-
-
+        if (message_string == "quit"){
+            send_back(pid, 221);
+            close_pasv(pid);
+            return;
+        } else if (message_string == "pasv"){
+            string msg = enter_pasv(pid);
+            if(msg == ""){
+                send_back(pid, 425);
+                continue;
+            }
+            send_back(pid, msg);
+            continue;
+        } else if (message_string.rfind("list", 0) == 0){
+            struct sockaddr_storage dummy{};
+            list(message_string, current_dir, pid, dummy);
+            continue;
+        } else if (message_string.rfind("cwd", 0) == 0){
+            // Optional: allow peers to change dir within jail
+            try{
+                string arg;
+                size_t sp = message_string.find(' ');
+                if(sp != string::npos) arg = message_string.substr(sp+1);
+                if(!arg.empty()){
+                    struct sockaddr_storage dummy2{};
+                    CWD(arg, &current_dir, parent_dir, pid, dummy2);
+                } else {
+                    send_back(pid, 501);
+                }
+            } catch(...) { send_back(pid, 501); }
+            continue;
+        } else {
+            // Minimal set for peer scanner; unknown commands
+            send_back(pid, 500);
+            continue;
+        }
     }
+    // ensure PASV state closed when loop exits
+    close_pasv(pid);
 }
