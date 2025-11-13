@@ -392,7 +392,7 @@ auto sess = openSession(ip, stoi(port));
                     close(data_connection); 
                     continue;
                 }
-                auto listing = readAll(data_connection);
+                auto listing = readAll(data_connection, 1000);
                 close(data_connection);
                 // Aggregate only directory lines at root (lines starting with 'd')
                 vector<string> dirs;
